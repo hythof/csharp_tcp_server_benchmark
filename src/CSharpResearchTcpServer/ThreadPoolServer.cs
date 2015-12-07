@@ -8,14 +8,19 @@ namespace CSharpResearchTcpServer
 {
     class ThreadPoolServer : ServerBase
     {
-        public override void Run(IPEndPoint end)
+        public ThreadPoolServer(IPEndPoint endpoint) : base(endpoint)
         {
-            var listener = new TcpListener(end);
+        }
+
+        public override void Run()
+        {
+            var listener = new TcpListener(Listen);
             listener.Start(backlog);
             var callback = new WaitCallback(handleTcpClient);
             while (true)
             {
                 var client = listener.AcceptTcpClient();
+                setSocketOption(client.Client);
                 Interlocked.Increment(ref AcceptCount);
                 ThreadPool.QueueUserWorkItem(callback, client);
             }
@@ -45,15 +50,15 @@ namespace CSharpResearchTcpServer
         void handleNetworkStream(NetworkStream stream)
         {
             var buffer = new byte[bufferSize];
-            while(true)
+            while (true)
             {
-                if(!fill(stream, buffer, headerSize))
+                if (!fill(stream, buffer, headerSize))
                 {
                     Interlocked.Increment(ref CloseByInvalidStream);
                     return;
                 }
                 var length = BitConverter.ToInt32(buffer, 0);
-                if(length == 0)
+                if (length == 0)
                 {
                     Interlocked.Increment(ref CloseByPeerCount);
                     return;
@@ -70,6 +75,11 @@ namespace CSharpResearchTcpServer
 
         bool fill(NetworkStream stream, byte[] buffer, int rest)
         {
+            if(rest > buffer.Length)
+            {
+                return false;
+            }
+
             int offset = 0;
             while (rest > 0)
             {
@@ -80,7 +90,7 @@ namespace CSharpResearchTcpServer
                     return false;
                 }
                 rest -= length;
-                offset += rest;
+                offset += length;
             }
             return true;
         }

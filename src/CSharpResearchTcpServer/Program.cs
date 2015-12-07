@@ -11,88 +11,135 @@ namespace CSharpResearchTcpServer
 {
     class Program
     {
-        static readonly int[] ports = new int[] { 17001, 17002, 17003 };
-        const int backlog = 1024;
-        const int concurrentCount = 500;
-        const int loopCount = 100;
+        const int concurrentCount = 1000;
+        const int loopCount = 1000;
         const int payloadLength = 1000;
-        static readonly byte[] headerPacket = BitConverter.GetBytes(payloadLength);
-        static readonly byte[] terminatePacket = new byte[] { 0, 0, 0, 0 };
-        static readonly byte[] payloadPacket = new byte[payloadLength];
 
         static void Main(string[] args)
         {
 #if DEBUG
-            Console.WriteLine("debug...");
+            Console.WriteLine("Build : DEBUG");
 #endif
 #if RELEASE
-            Console.WriteLine("release...");
+            Console.WriteLine("Build : RELEASE");
 #endif
-            for(var i=0; i< payloadPacket.Length; ++i)
-            {
-                payloadPacket[i] = (byte)i;
-            }
+            var benchmark = new Benchmark(
+                loopCount,
+                concurrentCount,
+                payloadLength,
+                new ServerBase[]
+                {
+                    new AwaitServer(new IPEndPoint(IPAddress.Loopback, 17001)),
+                    new AsyncSocketServer(new IPEndPoint(IPAddress.Loopback, 17002)),
+                    new ThreadPoolServer(new IPEndPoint(IPAddress.Loopback, 17003)),
+                }
+            );
 
-            if(args.Length >= 1)
+            if (args.Length >= 1)
             {
                 var cmd = args[0];
-                if(cmd == "server")
+                if (cmd == "server")
                 {
-                    bootServer().Wait();
+                    benchmark.BootServer().Wait();
                 }
-                else if(cmd == "client")
+                else if (cmd == "client")
                 {
                     var ip = IPAddress.Parse(args[1]);
-                    bootClient(ip).Wait();
+                    benchmark.BootClient(ip).Wait();
+                }
+                else
+                {
+                    Console.WriteLine("Command not found " + cmd);
                 }
             }
-            Task.WaitAll(
-                    bootServer(),
-                    Task.Delay(100).ContinueWith(_ => bootClient(IPAddress.Loopback))
-                );
+            else
+            {
+                Task.WaitAll(
+                        benchmark.BootServer(),
+                        Task.Delay(100).ContinueWith(_ => benchmark.BootClient(IPAddress.Loopback))
+                    );
+            }
+        }
+    }
+
+    class Benchmark
+    {
+        readonly int loopCount;
+        readonly int concurrentCount;
+        readonly int payloadLength;
+        static readonly byte[] terminatePacket = new byte[] { 0, 0, 0, 0 };
+        readonly byte[] headerPacket;
+        readonly byte[] payloadPacket;
+        ServerBase[] servers;
+
+        public Benchmark(int loopCount,
+            int concurrentCount,
+            int payloadLength,
+            ServerBase[] servers)
+        {
+            this.servers = servers;
+            this.loopCount = loopCount;
+            this.concurrentCount = concurrentCount;
+            this.payloadLength = payloadLength;
+
+            headerPacket = BitConverter.GetBytes(this.payloadLength);
+            payloadPacket = Enumerable.Range(1, payloadLength).Select(x => (byte)x).ToArray();
         }
 
-        static Task bootServer()
+        public Task BootServer()
         {
-            var s1 = new AwaitServer();
-            var s2 = new AsyncSocketServer();
-            var s3 = new ThreadPoolServer();
-            return Task.WhenAll(
-                runServer(s1, ports[0]),
-                runServer(s2, ports[1]),
-                runServer(s3, ports[2]),
-                Task.Run(() => {
-                    while(true)
+            var serverTask = Task.WhenAll(servers.Select(x => Task.Factory.StartNew(x.Run)));
+            var consoleTask = Task.Run(() =>
+            {
+                while (true)
+                {
+                    Console.ReadLine();
+                    int t1Max;
+                    int t2Max;
+                    ThreadPool.GetMaxThreads(out t1Max, out t2Max);
+                    int t1;
+                    int t2;
+                    ThreadPool.GetAvailableThreads(out t1, out t2);
+                    Console.WriteLine("Thread: worker({0}/{1}) io({2}/{3})",
+                        t1Max - t1,
+                        t1Max,
+                        t2Max - t2,
+                        t2Max
+                    );
+                    foreach (var server in servers)
                     {
-                        Console.ReadLine();
-                        Console.WriteLine(s1);
-                        Console.WriteLine(s2);
-                        Console.WriteLine(s3);
+                        Console.WriteLine(server);
                     }
-                })
-            );
+                }
+            });
+            return Task.WhenAll(serverTask, consoleTask);
         }
 
-        static Task runServer(ServerBase server, int port)
-        {
-            return Task.Run(() => server.Run(new IPEndPoint(IPAddress.Any, port)));
-        }
-
-        static async Task bootClient(IPAddress ip)
+        public async Task BootClient(IPAddress ip)
         {
             var sw = new Stopwatch();
-            foreach(var port in ports)
+            Console.WriteLine("Connections : {0:#,0}", concurrentCount);
+            Console.WriteLine("Payload     : {0:#,0}", payloadLength);
+            Console.WriteLine("Count       : {0:#,0}", loopCount);
+
+            ThreadPool.SetMinThreads(1024, 8);
+
+            foreach (var server in servers)
             {
-                var end = new IPEndPoint(ip, port);
+                await Task.Delay(1000).ConfigureAwait(false); // cooldown
+                var end = server.Listen;
+                sw.Reset();
                 sw.Restart();
                 var tasks = Enumerable.Range(0, concurrentCount).Select(_ => connectAndRequestResponse(end)).ToArray();
                 await Task.WhenAll(tasks).ConfigureAwait(false);
                 sw.Stop();
 
                 var error = tasks.Sum(x => x.Result);
-                Console.WriteLine("{0}: request per seconds({1}) error({2})",
-                    port,
-                    concurrentCount * loopCount / sw.Elapsed.TotalSeconds,
+                var seconds = sw.Elapsed.TotalSeconds;
+                Console.WriteLine("{0,-18}: Request Per Seconds({1:#,0}) elapsed({2:0.00}s) error({3})",
+                    server.GetType().Name,
+                    concurrentCount * loopCount / seconds,
+                    seconds,
                     error);
             }
             Console.WriteLine("done. close this window if enter some key.");
@@ -100,25 +147,36 @@ namespace CSharpResearchTcpServer
             System.Environment.Exit(0);
         }
 
-        static async Task<int> connectAndRequestResponse(IPEndPoint end)
+        async Task<int> connectAndRequestResponse(IPEndPoint end)
         {
             int error = 0;
             using (var client = new TcpClient())
             {
-                await client.ConnectAsync(end.Address, end.Port).ConfigureAwait(false);
+                client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+                try
+                {
+                    await client.ConnectAsync(end.Address, end.Port).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    //Console.WriteLine(ex.Message);
+                    return 1;
+                }
+
                 using (var stream = client.GetStream())
                 {
                     var buf = new byte[payloadLength];
                     for (var i = 0; i < loopCount; ++i)
                     {
-                        var rest = payloadLength;
                         await stream.WriteAsync(headerPacket, 0, headerPacket.Length).ConfigureAwait(false);
                         await stream.WriteAsync(payloadPacket, 0, payloadPacket.Length).ConfigureAwait(false);
+
+                        var rest = payloadLength;
                         while (rest > 0)
                         {
                             rest -= await stream.ReadAsync(buf, 0, buf.Length).ConfigureAwait(false);
                         }
-                        if(memcmp(payloadPacket, buf, payloadLength) != 0)
+                        if (memcmp(payloadPacket, buf, payloadLength) != 0)
                         {
                             ++error;
                         }
@@ -141,12 +199,23 @@ namespace CSharpResearchTcpServer
         public int CloseCount;
         public int CloseByPeerCount;
         public int CloseByInvalidStream;
+        public readonly IPEndPoint Listen;
         protected const int headerSize = 4;
-        protected const int backlog = 1024;
-        protected const int bufferSize = 1024;
+        protected const int backlog = 1000;
+        protected const int bufferSize = 1000;
         protected const char terminate = '\n';
 
-        abstract public void Run(IPEndPoint end);
+        public ServerBase(IPEndPoint endpoint)
+        {
+            Listen = endpoint;
+        }
+
+        abstract public void Run();
+
+        protected void setSocketOption(Socket sock)
+        {
+            sock.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+        }
 
         public override string ToString()
         {

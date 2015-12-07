@@ -8,16 +8,20 @@ namespace CSharpResearchTcpServer
 {
     class AwaitServer : ServerBase
     {
-        public override void Run(IPEndPoint end)
+        public AwaitServer(IPEndPoint endpoint) : base(endpoint)
         {
-            run(end).Wait();
+        }
+
+        public override void Run()
+        {
+            run(Listen).Wait();
         }
 
         async Task run(IPEndPoint end)
         {
             var listener = new TcpListener(end);
             listener.Start(backlog);
-            while(true)
+            while (true)
             {
                 var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
                 Interlocked.Increment(ref AcceptCount);
@@ -27,6 +31,7 @@ namespace CSharpResearchTcpServer
 
         async void handleTcpClient(TcpClient client)
         {
+            setSocketOption(client.Client);
             try
             {
                 using (var s = client.GetStream())
@@ -50,7 +55,7 @@ namespace CSharpResearchTcpServer
             var buffer = new byte[bufferSize];
             while (true)
             {
-                if(!await fill(stream, buffer, headerSize).ConfigureAwait(false))
+                if (!await fill(stream, buffer, headerSize).ConfigureAwait(false))
                 {
                     Interlocked.Increment(ref CloseByInvalidStream);
                     return;
@@ -73,12 +78,17 @@ namespace CSharpResearchTcpServer
 
         async Task<bool> fill(NetworkStream stream, byte[] buffer, int rest)
         {
+            if (rest > buffer.Length)
+            {
+                return false;
+            }
+
             int offset = 0;
             while (rest > 0)
             {
                 var length = await stream.ReadAsync(buffer, offset, rest).ConfigureAwait(false);
                 Interlocked.Increment(ref ReadCount);
-                if(length == 0)
+                if (length == 0)
                 {
                     return false;
                 }

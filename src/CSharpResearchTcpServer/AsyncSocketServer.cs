@@ -24,13 +24,17 @@ namespace CSharpResearchTcpServer
     {
         ManualResetEvent allDone = new ManualResetEvent(false);
 
-        public override void Run(IPEndPoint end)
+        public AsyncSocketServer(IPEndPoint endpoint) : base(endpoint)
+        {
+        }
+
+        public override void Run()
         {
             var listener = new Socket(
                 AddressFamily.InterNetwork,
                 SocketType.Stream,
                 ProtocolType.Tcp);
-            listener.Bind(end);
+            listener.Bind(Listen);
             listener.Listen(backlog);
 
             while (true)
@@ -49,6 +53,8 @@ namespace CSharpResearchTcpServer
             Interlocked.Increment(ref AcceptCount);
             var listener = (Socket)ar.AsyncState;
             var handler = listener.EndAccept(ar);
+
+            setSocketOption(listener);
 
             var state = new StateObject(handler, bufferSize);
             state.IsHeader = true;
@@ -104,9 +110,10 @@ namespace CSharpResearchTcpServer
                     }
                     if(state.BodyLength > state.Buffer.Length)
                     {
-                        Console.WriteLine("too big length");
                         Interlocked.Increment(ref CloseByInvalidStream);
                         Interlocked.Increment(ref CloseCount);
+                        Console.WriteLine("too big length");
+                        return;
                     }
                     state.Rest = state.BodyLength;
                     state.IsHeader = false;
